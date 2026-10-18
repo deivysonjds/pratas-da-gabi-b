@@ -1,6 +1,13 @@
 function errorHandler(error, req, res, next) {
   if (res.headersSent) return next(error);
 
+  if (error.type === 'entity.parse.failed') {
+    return res.status(400).json({ message: 'Corpo JSON inválido.' });
+  }
+  if (error.type === 'entity.too.large') {
+    return res.status(413).json({ message: 'O corpo da requisição excede o limite permitido.' });
+  }
+
   if (error.name === 'MulterError') {
     const message = error.code === 'LIMIT_FILE_SIZE'
       ? 'A imagem excede o limite de 5 MB.'

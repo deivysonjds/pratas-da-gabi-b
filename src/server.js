@@ -3,15 +3,14 @@ require('dotenv').config();
 const app = require('./app');
 const { sequelize } = require('./models');
 
-const PORT = Number(process.env.PORT || 3000);
+const PORT = Number(process.env.PORT || 3333);
 
 async function start() {
   try {
     await sequelize.authenticate();
     console.log('Conexão com PostgreSQL estabelecida.');
 
-    // Para desenvolvimento inicial. Use migrations em produção.
-    await sequelize.sync();
+    // O esquema é gerenciado por migrations: npm run db:migrate
 
     app.listen(PORT, () => {
       console.log(`API rodando em http://localhost:${PORT}`);

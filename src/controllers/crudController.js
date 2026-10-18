@@ -1,7 +1,7 @@
 const { ValidationError, UniqueConstraintError } = require('sequelize');
 
 function sendError(res, error) {
-  if (error instanceof ValidationError || error instanceof UniqueConstraintError) {
+  if (error instanceof ValidationError || error instanceof UniqueConstraintError || error.name === 'ValidationError') {
     return res.status(400).json({ message: error.message });
   }
   if (error.name === 'SequelizeForeignKeyConstraintError') {

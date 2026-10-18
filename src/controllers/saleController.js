@@ -3,24 +3,48 @@ const {
 } = require('../models');
 const { createCrudController, sendError } = require('./crudController');
 
+function isValidCPF(value) {
+  const cpf = String(value || '').replace(/\D/g, '');
+  if (cpf.length !== 11 || /^(\d)\1{10}$/.test(cpf)) return false;
+  const digit = length => {
+    let sum = 0;
+    for (let i = 0; i < length; i += 1) sum += Number(cpf[i]) * (length + 1 - i);
+    const remainder = (sum * 10) % 11;
+    return remainder === 10 ? 0 : remainder;
+  };
+  return digit(9) === Number(cpf[9]) && digit(10) === Number(cpf[10]);
+}
+
 const include = [
   { model: Client, as: 'client' },
   { model: ProductSale, as: 'items', include: [{ model: Product, as: 'product' }] },
   { model: Installment, as: 'installments' }
 ];
 
+async function validateSaleUpdate(data) {
+  if (Object.hasOwn(data, 'status') && !['PENDING', 'PAID', 'CANCELED'].includes(String(data.status).toUpperCase())) {
+    const error = new Error('Status de venda inválido.'); error.name = 'ValidationError'; throw error;
+  }
+  if (Object.hasOwn(data, 'status')) data.status = String(data.status).toUpperCase();
+  if (Object.hasOwn(data, 'paymentMethod') && (typeof data.paymentMethod !== 'string' || !data.paymentMethod.trim() || data.paymentMethod.trim().length > 50)) {
+    const error = new Error('Forma de pagamento inválida.'); error.name = 'ValidationError'; throw error;
+  }
+  if (Object.hasOwn(data, 'paymentMethod')) data.paymentMethod = data.paymentMethod.trim();
+}
+
 const crud = createCrudController(Sale, {
   fields: ['client_id', 'status', 'paymentMethod'],
-  include
+  include,
+  beforeUpdate: validateSaleUpdate
 });
 
 async function createComplete(req, res) {
   const { client_id, paymentMethod, products, installments = [] } = req.body || {};
 
   if (!Number.isInteger(Number(client_id)) || Number(client_id) <= 0 ||
-      typeof paymentMethod !== 'string' || !paymentMethod.trim() ||
-      !Array.isArray(products) || products.length === 0 ||
-      !Array.isArray(installments)) {
+      typeof paymentMethod !== 'string' || !['Pix', 'Dinheiro', 'Cartão de Crédito', 'Cartão de Débito', 'Parcelado'].includes(paymentMethod.trim()) ||
+      !Array.isArray(products) || products.length === 0 || products.length > 100 ||
+      !Array.isArray(installments) || installments.length > 100) {
     return res.status(400).json({
       message: 'Informe client_id, paymentMethod, uma lista products e uma lista installments opcional.'
     });
@@ -110,6 +134,91 @@ async function createComplete(req, res) {
   }
 }
 
+
+async function createPublicSale(req, res) {
+  const { customer, items, paymentMethod } = req.body || {};
+  const name = typeof customer?.name === 'string' ? customer.name.trim() : '';
+  const cpf = typeof customer?.cpf === 'string' ? customer.cpf.replace(/\D/g, '') : '';
+  const email = typeof customer?.email === 'string' ? customer.email.trim().toLowerCase() : '';
+  const contact = typeof (customer?.phone ?? customer?.contact) === 'string'
+    ? String(customer.phone ?? customer.contact).trim() : '';
+
+  if (name.length < 3 || name.length > 120 || !isValidCPF(cpf) ||
+      !/^\S+@\S+\.\S+$/.test(email) || email.length > 254 ||
+      contact.replace(/\D/g, '').length < 10 || contact.length > 30 ||
+      typeof paymentMethod !== 'string' || !['Pix', 'Dinheiro', 'Cartão de Crédito', 'Cartão de Débito'].includes(paymentMethod.trim()) ||
+      !Array.isArray(items) || items.length === 0 || items.length > 100) {
+    return res.status(400).json({ message: 'Confira os dados do cliente, pagamento e produtos.' });
+  }
+
+  const quantities = new Map();
+  let totalUnits = 0;
+  for (const item of items) {
+    const productId = Number(item?.productId ?? item?.product_id ?? item?.id);
+    const quantity = Number(item?.quantity ?? 1);
+    if (!Number.isInteger(productId) || productId < 1 || !Number.isInteger(quantity) || quantity < 1 || quantity > 50) {
+      return res.status(400).json({ message: 'Um ou mais itens da compra são inválidos.' });
+    }
+    totalUnits += quantity;
+    if (totalUnits > 100) return res.status(400).json({ message: 'O pedido pode conter no máximo 100 unidades.' });
+    quantities.set(productId, (quantities.get(productId) || 0) + quantity);
+  }
+
+  const transaction = await sequelize.transaction();
+  try {
+    const clients = await Client.findAll({ transaction });
+    let client = clients.find(existing => String(existing.cpf || '').replace(/\D/g, '') === cpf) || null;
+    if (client) {
+      await client.update({ name, cpf, email, contact }, { transaction });
+    } else {
+      const emailOwner = await Client.findOne({ where: { email }, transaction });
+      if (emailOwner) {
+        await transaction.rollback();
+        return res.status(409).json({ message: 'Este e-mail já está cadastrado com outro CPF. Confira os dados ou entre em contato com a loja.' });
+      }
+      client = await Client.create({ name, cpf, email, contact }, { transaction });
+    }
+
+    const ids = [...quantities.keys()];
+    const found = await Product.findAll({
+      where: { id: ids }, transaction, lock: transaction.LOCK.UPDATE
+    });
+    if (found.length !== ids.length) {
+      await transaction.rollback();
+      return res.status(400).json({ message: 'Um ou mais produtos não estão disponíveis.' });
+    }
+    for (const product of found) {
+      const requested = quantities.get(product.id);
+      if (Number(product.stock) < requested) {
+        await transaction.rollback();
+        return res.status(409).json({ message: `Estoque insuficiente para ${product.name}.`, available: product.stock, requested });
+      }
+    }
+
+    const sale = await Sale.create({
+      client_id: client.id,
+      paymentMethod: paymentMethod.trim(),
+      status: 'PENDING'
+    }, { transaction });
+
+    for (const [productId, quantity] of quantities.entries()) {
+      for (let index = 0; index < quantity; index += 1) {
+        await ProductSale.create({ sale_id: sale.id, product_id: productId }, { transaction });
+      }
+      const product = found.find(entry => entry.id === productId);
+      await product.decrement('stock', { by: quantity, transaction });
+    }
+
+    await transaction.commit();
+    const result = await Sale.findByPk(sale.id, { include });
+    const total = (result.items || []).reduce((sum, row) => sum + Number(row.product?.value || 0), 0);
+    return res.status(201).json({ message: 'Pedido registrado com sucesso.', sale: result, total });
+  } catch (error) {
+    if (!transaction.finished) await transaction.rollback();
+    return sendError(res, error);
+  }
+}
+
 async function deleteSale(req, res) {
   const transaction = await sequelize.transaction();
   try {
@@ -141,4 +250,4 @@ async function deleteSale(req, res) {
   }
 }
 
-module.exports = { ...crud, createComplete, deleteSale };
+module.exports = { ...crud, createComplete, createPublicSale, deleteSale };

@@ -1,6 +1,8 @@
 const express = require('express');
 const router = express.Router();
 
+const authenticate = require('../middleware/authenticate');
+const auth = require('../controllers/authController');
 const clients = require('../controllers/clientController');
 const users = require('../controllers/userController');
 const categories = require('../controllers/categoryController');
@@ -9,28 +11,33 @@ const sales = require('../controllers/saleController');
 const installments = require('../controllers/installmentController');
 const productImage = require('../controllers/productImageController');
 
-function crudRoutes(path, controller) {
-  router.post(path, controller.create);
-  router.get(path, controller.findAll);
-  router.get(`${path}/:id`, controller.findById);
-  router.put(`${path}/:id`, controller.update);
-  router.delete(`${path}/:id`, controller.remove);
+// Rotas públicas estritamente necessárias para autenticação e compra na vitrine.
+router.post('/auth/login', auth.login);
+router.post('/auth/refresh', auth.refresh);
+router.post('/auth/logout', auth.logout);
+router.get('/products', products.findAll);
+router.post('/sales', sales.createPublicSale);
+
+function protectedCrudRoutes(path, controller) {
+  router.post(path, authenticate, controller.create);
+  router.get(path, authenticate, controller.findAll);
+  router.get(`${path}/:id`, authenticate, controller.findById);
+  router.put(`${path}/:id`, authenticate, controller.update);
+  router.delete(`${path}/:id`, authenticate, controller.remove);
 }
 
-crudRoutes('/clients', clients);
-crudRoutes('/users', users);
-crudRoutes('/categories', categories);
-crudRoutes('/products', products);
-crudRoutes('/installments', installments);
+protectedCrudRoutes('/clients', clients);
+protectedCrudRoutes('/users', users);
+protectedCrudRoutes('/categories', categories);
+protectedCrudRoutes('/products', products);
+protectedCrudRoutes('/installments', installments);
 
-// Rotas específicas de vendas ficam antes de /sales/:id.
-router.post('/sales/complete', sales.createComplete);
-router.post('/sales', sales.create);
-router.get('/sales', sales.findAll);
-router.get('/sales/:id', sales.findById);
-router.put('/sales/:id', sales.update);
-router.delete('/sales/:id', sales.deleteSale);
-
-router.post('/products/:id/image', productImage.upload.single('image'), productImage.uploadImage);
+// Rotas administrativas de venda.
+router.post('/sales/complete', authenticate, sales.createComplete);
+router.get('/sales', authenticate, sales.findAll);
+router.get('/sales/:id', authenticate, sales.findById);
+router.put('/sales/:id', authenticate, sales.update);
+router.delete('/sales/:id', authenticate, sales.deleteSale);
+router.post('/products/:id/image', authenticate, productImage.upload.single('image'), productImage.uploadImage);
 
 module.exports = router;

@@ -1,51 +1,46 @@
-# Loja API
+# API Pratas da Gabi
 
-API REST em JavaScript com Express, Sequelize, PostgreSQL via `DATABASE_URL` e Supabase Storage para imagens.
+API Express + Sequelize + PostgreSQL/Supabase, com JWT (HS256), refresh token rotativo, cookies HttpOnly, CORS por allowlist, rate limit, sanitização de entradas e upload de imagens no Supabase Storage.
 
-## Requisitos
+## Configuração local
 
-- Node.js 20+
-- PostgreSQL acessível via `DATABASE_URL`
-- Projeto Supabase com bucket `products` (ou outro nome configurado em `SUPABASE_BUCKET`)
+1. Copie `.env.example` para `.env` e configure `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` (ou, alternativamente, `DATABASE_URL`), `ACCESS_TOKEN_SECRET` (segredo aleatório de pelo menos 32 caracteres), credenciais do Supabase Storage e `CORS_ORIGINS=http://localhost:3000`.
+2. Para Supabase, copie host, usuário e porta do mesmo método de conexão em **Connect**: a conexão direta `db.<project-ref>.supabase.co` normalmente usa o usuário `postgres`; o Session Pooler usa o host/porta do pooler e frequentemente o usuário `postgres.<project-ref>`. Não misture o host direto com o usuário do pooler. `DB_SSL=true` ativa TLS com validação do certificado; use o certificado CA confiável quando sua rede exigir uma CA específica. Não desative a validação em produção.
+3. Instale dependências: `npm install`.
+4. Execute migrations: `npm run db:migrate`.
+5. Crie o primeiro usuário administrativo: `npm run user:create`.
+6. Inicie: `npm run dev` (API em `http://localhost:3333`).
 
-## Instalação
+## Frontend Next.js
 
-```bash
-npm install
-```
+O frontend usa um rewrite same-origin `/backend/*` para encaminhar à API e permitir cookies HttpOnly no domínio do frontend. Em local, `API_PROXY_TARGET=http://localhost:3333`. Em produção, configure `API_PROXY_TARGET` com a URL raiz do backend, por exemplo `https://seu-backend.onrender.com`, e `NEXT_PUBLIC_API_URL=/backend/api`. Não inclua `/api` no `API_PROXY_TARGET`.
 
-Copie `.env.example` para `.env` e preencha as variáveis.
+No backend em produção, configure `CORS_ORIGINS` com a origem exata do frontend (por exemplo `https://seu-site.vercel.app`), `COOKIE_SECURE=true`, `COOKIE_SAME_SITE=none`, `NODE_ENV=production` e `TRUST_PROXY=true` se o host estiver atrás de um proxy confiável. Em local, os defaults são adequados para `http://localhost:3000`.
 
-```bash
-npm run dev
-```
+## Rotas públicas
 
-Verifique `GET http://localhost:3000/health`.
+- `GET /health`: verificação de disponibilidade.
+- `POST /api/auth/login`: autentica email/senha, define cookies HttpOnly e devolve dados do usuário.
+- `POST /api/auth/refresh`: usa refresh cookie, revoga o refresh token anterior e emite um novo par.
+- `POST /api/auth/logout`: revoga o refresh token e limpa cookies.
+- `GET /api/products`: catálogo público para a vitrine.
+- `POST /api/sales`: finaliza pedido público, valida cliente/produtos/estoque e registra a venda atomicamente.
 
-A aplicação usa `sequelize.sync()` para facilitar o primeiro teste. Para produção, substitua por migrations versionadas. Se estiver usando um banco já existente, confira o esquema e os nomes das colunas antes de iniciar.
+Todas as demais rotas de `/api` exigem JWT válido, via cookie HttpOnly ou `Authorization: Bearer <JWT>`. O middleware do Next.js 16 (arquivo `proxy.ts`) bloqueia navegação sem cookies de sessão; a API continua sendo a autoridade final de autenticação e autorização.
 
-## Upload de imagem
+## Segurança
 
-`POST /api/products/:id/image` como `multipart/form-data`, campo `image`. Tipos aceitos: JPG, PNG e WebP; limite de 5 MB. O bucket precisa ser público para que a URL pública retornada funcione. Para bucket privado, implemente URLs assinadas.
+- JWT de acesso HS256 com expiração curta; refresh token aleatório, armazenado somente como hash e rotacionado a cada renovação.
+- Cookies `HttpOnly`; `Secure` e `SameSite` configuráveis.
+- CORS com origens explícitas, verificação de `Origin` em mutações, Helmet, limite de payload e rate limit global, de autenticação e de pedidos.
+- Sanitização XSS de campos textuais e allowlists de campos nos CRUDs; senhas/tokens não são alterados pelo sanitizador para preservar autenticação.
+- Sequelize usa consultas parametrizadas; validações adicionais nos controladores.
+- A chave `SUPABASE_SERVICE_ROLE_KEY` fica somente no backend. Nunca use prefixo `NEXT_PUBLIC_` para ela.
 
-## Endpoints
+## Migrations
 
-Para cada recurso CRUD, exceto `/sales` que tem regras próprias:
-- `POST /api/clients`, `/api/users`, `/api/categories`, `/api/products`, `/api/installments`
-- `GET /api/<recurso>`
-- `GET /api/<recurso>/:id`
-- `PUT /api/<recurso>/:id`
-- `DELETE /api/<recurso>/:id`
+A migration `202610180001-product-category-many-to-one.js` remove a restrição UNIQUE de `product.category_id`, permitindo vários produtos na mesma categoria, como esperado em uma loja. Se a migration anterior já tiver sido executada, aplique as migrations pendentes com `npm run db:migrate`.
 
-Vendas:
-- `POST /api/sales/complete` cria venda com produtos e parcelas em transação.
-- `POST /api/sales` cria venda simples.
-- `GET /api/sales`, `GET /api/sales/:id`, `PUT /api/sales/:id`, `DELETE /api/sales/:id`
+## Limites conhecidos
 
-## Observações importantes
-
-- `product.category_id` foi mantido como `unique`, conforme o esquema fornecido. Isso limita cada categoria a um único produto. Remova `unique: true` se uma categoria puder ter vários produtos.
-- Como `product_sale` não possui coluna `quantity`, cada ocorrência do ID de produto no array `products` representa uma unidade. Ex.: `[1, 1, 2]` vende duas unidades do produto 1 e uma do produto 2.
-- `value` e `amount` seguem o esquema original (`DOUBLE`). Para dinheiro em produção, prefira `DECIMAL` e faça cálculos monetários com precisão decimal.
-- O CRUD de usuários não retorna o hash de senha, mas endpoints de administração precisam de autenticação/autorização antes de expor a API publicamente.
-- O código valida MIME e tamanho no upload, mas uma aplicação pública deve também validar o conteúdo real do arquivo, proteger rotas e aplicar limites de requisições.
+O esquema fornecido de `product_sale` não guarda quantidade nem preço histórico; para representar quantidades, o backend grava uma linha por unidade e calcula o total a partir do preço atual do produto. Para preservar preços históricos e simplificar relatórios, recomenda-se adicionar `quantity` e `unit_price` em `product_sale` em uma migration futura.
