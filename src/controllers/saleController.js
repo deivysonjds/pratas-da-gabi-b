@@ -134,6 +134,40 @@ async function createComplete(req, res) {
   }
 }
 
+async function updateStatus(req, res) {
+  const { id } = req.params;
+  const { status } = req.body || {};
+
+  const allowedStatuses = ['PENDING', 'PAID', 'CANCELED'];
+
+  if (!allowedStatuses.includes(String(status).toUpperCase())) {
+    return res.status(400).json({
+      message: 'Status inválido. Utilize PENDING, PAID ou CANCELED.'
+    });
+  }
+
+  try {
+    const sale = await Sale.findByPk(id);
+
+    if (!sale) {
+      return res.status(404).json({
+        message: 'Venda não encontrada.'
+      });
+    }
+
+    await sale.update({
+      status: String(status).toUpperCase()
+    });
+
+    return res.status(200).json({
+      message: 'Status da venda atualizado com sucesso.',
+      sale
+    });
+  } catch (error) {
+    return sendError(res, error);
+  }
+}
+
 
 async function createPublicSale(req, res) {
   const { customer, items, paymentMethod } = req.body || {};
@@ -250,4 +284,4 @@ async function deleteSale(req, res) {
   }
 }
 
-module.exports = { ...crud, createComplete, createPublicSale, deleteSale };
+module.exports = { ...crud, createComplete, createPublicSale, deleteSale, updateStatus };

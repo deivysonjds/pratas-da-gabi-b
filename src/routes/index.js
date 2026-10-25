@@ -32,7 +32,8 @@ protectedCrudRoutes('/categories', categories);
 protectedCrudRoutes('/products', products);
 protectedCrudRoutes('/installments', installments);
 
-// Rotas administrativas de venda.
+router.patch('/sales/:id/status', authenticate, sales.updateStatus);
+router.patch('/installments/:id/status', authenticate, installments.updateStatus);
 router.post('/sales/complete', authenticate, sales.createComplete);
 router.get('/sales', authenticate, sales.findAll);
 router.get('/sales/:id', authenticate, sales.findById);
